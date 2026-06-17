@@ -80,23 +80,37 @@ jobs:
         DUMP_DIR_LIST=$(find -type d -not -empty -printf "%P\n" | grep -v / | grep -v .git)
         git init
         git lfs install
+
+        # Fix RPC / HTTP/2 errors with large pushes
+        git config --global http.version HTTP/1.1
+        git config --global http.postBuffer 524288000   # 500 MB
+        git config --global http.lowSpeedLimit 0
+        git config --global http.lowSpeedTime 999999
+
+        # Set the correct Git user identity (as requested)
+        git config --global user.name "VexLight"
+        git config --global user.email "vexlight99@gmail.com"
+
         find . \( -name "*sensetime*" -o -name "*.lic" \) | cut -d'/' -f'2-' >| .gitignore
         git branch -M ${{ env.BRANCH }}
-        git config --global user.name "SavedByLight"
-        git config --global user.email "mrfluffyoven@gmail.com"
         git remote add origin https://${{ secrets.GITLAB_TOKEN_NAME }}:${{ secrets.GITLAB_TOKEN }}@gitlab.com/${{ env.USERNAME }}/android_dump_${{ env.MANUFACTURER_NAME }}_${{ env.VENDOR_NAME }}.git
+
+        # Track all files larger than 100MB with LFS
         find . -type f -size +100M -exec git lfs track {} \;
+
         if [ -f .gitattributes ]; then
             git add .gitattributes
             git commit -s -m "Setup Git LFS"
             git push -u origin ${{ env.BRANCH }}
         fi
+
         for dir in ${DUMP_DIR_LIST}; do
             git add ${dir}
             git commit -s -m "dump: ${dir}: import dump for ${VENDOR_NAME}
             Firmware: ${{ github.event.inputs.FIRMWARE_LINK }}"
             git push -u origin ${{ env.BRANCH }}
         done
+
         git add .
         git commit -s -m "dump: import remaining dump for ${VENDOR_NAME}
         Firmware: ${{ github.event.inputs.FIRMWARE_LINK }}"
