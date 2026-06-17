@@ -33,7 +33,7 @@ jobs:
         git clone --depth=1 https://github.com/DumprX/DumprX.git ./dumprx
         cd dumprx && bash setup.sh
 
-    # Fix for "Illegal instruction" – replace ARM magiskboot with latest x86_64 version
+    # Fix for "Illegal instruction" – extract latest x86_64 magiskboot from APK
     - name: Install latest x86_64 magiskboot
       run: |
         # Get the latest Magisk release tag
@@ -42,15 +42,18 @@ jobs:
           echo "Failed to get latest tag, falling back to v28.0"
           LATEST_TAG="v28.0"
         fi
-        # Remove leading 'v' for the zip filename (e.g., v28.0 -> 28.0)
-        VERSION=${LATEST_TAG#v}
-        ZIP_URL="https://github.com/topjohnwu/Magisk/releases/download/${LATEST_TAG}/magisk-${VERSION}.zip"
-        echo "Downloading $ZIP_URL"
-        wget -q -O /tmp/magisk.zip "$ZIP_URL"
-        # Extract the x86_64 binary
-        unzip -j /tmp/magisk.zip 'lib/x86_64/libmagiskboot.so' -d /tmp
+        echo "Latest tag: $LATEST_TAG"
+
+        # Download the APK for the latest release
+        APK_URL="https://github.com/topjohnwu/Magisk/releases/download/${LATEST_TAG}/Magisk-${LATEST_TAG#v}.apk"
+        echo "Downloading $APK_URL"
+        wget -q -O /tmp/magisk.apk "$APK_URL"
+
+        # Extract the x86_64 binary from the APK
+        unzip -j /tmp/magisk.apk 'lib/x86_64/libmagiskboot.so' -d /tmp
         mv /tmp/libmagiskboot.so /tmp/magiskboot
         chmod +x /tmp/magiskboot
+
         # Override the binary used by dumper.sh
         echo "MAGISKBOOT=/tmp/magiskboot" >> $GITHUB_ENV
         # Also replace the one inside the workspace to be safe
