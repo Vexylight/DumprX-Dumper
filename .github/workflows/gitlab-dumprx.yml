@@ -36,25 +36,37 @@ jobs:
     # Fix for "Illegal instruction" – extract latest x86_64 magiskboot from APK
     - name: Install latest x86_64 magiskboot
       run: |
-        # Get the latest Magisk release tag
-        LATEST_TAG=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | jq -r .tag_name)
+        # Get the latest release data from GitHub API
+        RELEASE_DATA=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest)
+        LATEST_TAG=$(echo "$RELEASE_DATA" | jq -r .tag_name)
+        
         if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
           echo "Failed to get latest tag, falling back to v28.0"
           LATEST_TAG="v28.0"
         fi
         echo "Latest tag: $LATEST_TAG"
 
-        # Download the APK for the latest release
-        APK_URL="https://github.com/topjohnwu/Magisk/releases/download/${LATEST_TAG}/Magisk-${LATEST_TAG#v}.apk"
-        echo "Downloading $APK_URL"
-        wget -q -O /tmp/magisk.apk "$APK_URL"
+        # Find the APK asset URL from the release data
+        APK_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("Magisk-.*\\.apk$")) | .browser_download_url' | head -n1)
+        
+        if [ -z "$APK_URL" ] || [ "$APK_URL" = "null" ]; then
+          echo "No APK asset found in release data, trying fallback URL"
+          APK_URL="https://github.com/topjohnwu/Magisk/releases/download/${LATEST_TAG}/Magisk-${LATEST_TAG#v}.apk"
+        fi
+        
+        echo "Downloading APK from: $APK_URL"
+        # Download with retry and fallback
+        wget -q --tries=3 --timeout=10 -O /tmp/magisk.apk "$APK_URL" || {
+          echo "Download failed, falling back to hardcoded v28.0 APK"
+          wget -q -O /tmp/magisk.apk "https://github.com/topjohnwu/Magisk/releases/download/v28.0/Magisk-28.0.apk"
+        }
 
         # Extract the x86_64 binary from the APK
         unzip -j /tmp/magisk.apk 'lib/x86_64/libmagiskboot.so' -d /tmp
         mv /tmp/libmagiskboot.so /tmp/magiskboot
         chmod +x /tmp/magiskboot
 
-        # Override the binary used by dumper.sh
+        # Set environment variable for dumper.sh
         echo "MAGISKBOOT=/tmp/magiskboot" >> $GITHUB_ENV
         # Also replace the one inside the workspace to be safe
         cp /tmp/magiskboot workspace/dumprx/bin/magiskboot 2>/dev/null || true
