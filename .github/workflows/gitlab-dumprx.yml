@@ -33,49 +33,29 @@ jobs:
         git clone --depth=1 https://github.com/DumprX/DumprX.git ./dumprx
         cd dumprx && bash setup.sh
 
-    - name: Dump Firmware & Generate Repo Name
+    - name: Dump Firmware
       run: |
         cd workspace/dumprx
         bash dumper.sh ${{ github.event.inputs.FIRMWARE_LINK }}
         cd out
-        
-        # 1. Extract Manufacturer (needed for other steps)
-        MANUFACTURER=$(grep "ro.product.vendor.manufacturer" vendor/build.prop | awk -F "=" '{split($2, words, " "); print words[1]; exit}')
-        echo "MANUFACTURER_NAME=${MANUFACTURER}" >> $GITHUB_ENV
+        echo "MANUFACTURER_NAME=$(grep "ro.product.vendor.manufacturer" vendor/build.prop | awk -F "=" '{split($2, words, " "); print words[1]; exit}')" >> $GITHUB_ENV
 
-        # 2. Try to extract Repo Name from README.md
-        # DumprX usually puts the summary in a code block like: ## a34xdxx-user 15 ...
+        # Extract Repo Name from README.md
         RAW_STRING=""
         if [ -f README.md ]; then
-          RAW_STRING=$(grep "^## " README.md | head -n 1 | sed 's/^## //')
+          RAW_STRING=$(grep "release-keys" README.md | head -n 1 | sed 's/^[#-]* //')
+          if [ -z "$RAW_STRING" ]; then
+            RAW_STRING=$(grep "^## " README.md | head -n 1 | sed 's/^## //')
+          fi
         fi
-
-        # 3. Fallback: If README failed, build it from build.prop
-        if [ -z "$RAW_STRING" ]; then
-          echo "⚠️ README.md parsing failed. Using build.prop fallback."
-          CODENAME=$(grep "ro.product.vendor.device" vendor/build.prop | awk -F "=" '{split($2, words, " "); print words[1]; exit}')
-          BUILD_ID=$(grep "ro.build.id" vendor/build.prop | awk -F "=" '{split($2, words, " "); print words[1]; exit}')
-          if [ -z "$BUILD_ID" ]; then BUILD_ID=$(grep "ro.vendor.build.id" vendor/build.prop | awk -F "=" '{split($2, words, " "); print words[1]; exit}'); fi
-          INCREMENTAL=$(grep "ro.build.incremental" vendor/build.prop | awk -F "=" '{split($2, words, " "); print words[1]; exit}')
-          if [ -z "$INCREMENTAL" ]; then INCREMENTAL=$(grep "ro.vendor.build.incremental" vendor/build.prop | awk -F "=" '{split($2, words, " "); print words[1]; exit}'); fi
-          ANDROID_VER=$(grep "ro.build.version.release" vendor/build.prop | awk -F "=" '{split($2, words, " "); print words[1]; exit}')
-          
-          RAW_STRING="${CODENAME}-user ${ANDROID_VER} ${BUILD_ID} ${INCREMENTAL} release-keys"
-        fi
-
-        # 4. Sanitize for GitLab Repo Name (Replace spaces with hyphens)
-        REPO_NAME=$(echo "$RAW_STRING" | tr ' ' '-' | tr '/' '-')
         
-        # Prefix it to keep your dumps organized
-        FINAL_REPO_NAME="android_dump_${REPO_NAME}"
-
-        # FAILSAFE
-        if [ -z "$FINAL_REPO_NAME" ] || [ "$FINAL_REPO_NAME" = "android_dump_" ]; then
-          FINAL_REPO_NAME="android_dump_unknown_${{ github.run_id }}"
+        # Sanitize for GitLab (replace spaces with hyphens)
+        REPO_NAME=$(echo "$RAW_STRING" | tr ' ' '-' | tr '/' '-')
+        if [ -z "$REPO_NAME" ]; then
+           REPO_NAME="${{ env.MANUFACTURER_NAME }}_${{ github.run_id }}"
         fi
-
-        echo "REPO_NAME=${FINAL_REPO_NAME}" >> $GITHUB_ENV
-        echo "✅ Final Repo Name: ${FINAL_REPO_NAME}"
+        
+        echo "REPO_NAME=${REPO_NAME}" >> $GITHUB_ENV
 
     - name: Set Variables - if oplus
       if: env.MANUFACTURER_NAME == 'oplus'
@@ -101,56 +81,20 @@ jobs:
         echo "VENDOR_NAME=$(grep "ro.product.vendor.device" vendor/build.prop | awk -F "=" '{split($2, words, " "); print words[1]; exit}')" >> $GITHUB_ENV
         echo "BRANCH=$(grep "ro.vendor.build.id" vendor/build.prop | awk -F "=" '{split($2, words, " "); print words[1]; exit}')" >> $GITHUB_ENV
 
-    - name: Check or Create GitLab Repository
+    - name: Create Gitlab Repository
       run: |
         cd workspace
-        
-        # Determine Username
-        GL_USER="${{ secrets.GITLAB_USERNAME }}"
-        if [ -z "$GL_USER" ]; then
-          GL_USER="${{ secrets.GITLAB_TOKEN_NAME }}"
-        fi
-        
-        if [ -z "$GL_USER" ]; then
-          echo "::error::GitLab Username not found in secrets."
-          exit 1
-        fi
+        curl --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" -X POST "https://gitlab.com/api/v4/projects?name=${{ env.REPO_NAME }}&visibility=public" > repo.json
+        echo "USERNAME=$(cat repo.json | grep -o '"username":"[^"]*' | cut -d'"' -f4)" >> $GITHUB_ENV
+        cat repo.json
 
-        echo "🔍 Checking for repo: ${GL_USER}/${{ env.REPO_NAME }}"
-
-        # Check if repo exists
-        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" "https://gitlab.com/api/v4/projects/${GL_USER}%2F${{ env.REPO_NAME }}")
-        
-        if [ "$HTTP_STATUS" -eq 200 ]; then
-          echo "✅ Repository already exists. Skipping creation."
-          curl -s --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" "https://gitlab.com/api/v4/projects/${GL_USER}%2F${{ env.REPO_NAME }}" > repo.json
-        else
-          echo "🆕 Creating new repo..."
-          curl --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" -X POST "https://gitlab.com/api/v4/projects?name=${{ env.REPO_NAME }}&visibility=public" > repo.json
-        fi
-        
-        # Extract Namespace
-        if command -v python3 &>/dev/null; then
-          EXTRACTED_USER=$(cat repo.json | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('namespace', {}).get('path', ''))")
-        else
-          EXTRACTED_USER="$GL_USER"
-        fi
-
-        if [ -z "$EXTRACTED_USER" ]; then
-          EXTRACTED_USER="$GL_USER"
-        fi
-
-        echo "USERNAME=${EXTRACTED_USER}" >> $GITHUB_ENV
-
-    - name: Push to GitLab
+    - name: Push as Repository
       run: |
         cd workspace/dumprx/out
         rm -rf .git
         rm -rf .gitignore
         rm -rf .gitattributes
-        
         DUMP_DIR_LIST=$(find -type d -not -empty -printf "%P\n" | grep -v / | grep -v .git)
-        
         git init
         git lfs install
 
@@ -160,20 +104,13 @@ jobs:
         git config --global http.lowSpeedLimit 0
         git config --global http.lowSpeedTime 999999
 
-        # Set Git identity
+        # Set the correct Git user identity (as requested)
         git config --global user.name "VexLight"
         git config --global user.email "vexlight99@gmail.com"
 
         find . \( -name "*sensetime*" -o -name "*.lic" \) | cut -d'/' -f'2-' >| .gitignore
-        
         git branch -M ${{ env.BRANCH }}
-        
-        # Remote URL using the new dynamic REPO_NAME
-        REMOTE_URL="https://${{ secrets.GITLAB_TOKEN_NAME }}:${{ secrets.GITLAB_TOKEN }}@gitlab.com/${{ env.USERNAME }}/${{ env.REPO_NAME }}.git"
-        
-        echo "🚀 Pushing to: https://***:***@gitlab.com/${{ env.USERNAME }}/${{ env.REPO_NAME }}.git"
-        
-        git remote add origin $REMOTE_URL
+        git remote add origin https://${{ secrets.GITLAB_TOKEN_NAME }}:${{ secrets.GITLAB_TOKEN }}@gitlab.com/${{ env.USERNAME }}/${{ env.REPO_NAME }}.git
 
         # Track all files larger than 100MB with LFS
         find . -type f -size +100M -exec git lfs track {} \;
@@ -181,16 +118,17 @@ jobs:
         if [ -f .gitattributes ]; then
             git add .gitattributes
             git commit -s -m "Setup Git LFS"
+            git push -u origin ${{ env.BRANCH }}
         fi
 
         for dir in ${DUMP_DIR_LIST}; do
             git add ${dir}
-            git commit -s -m "dump: ${dir}: import dump for ${{ env.VENDOR_NAME }}
+            git commit -s -m "dump: ${dir}: import dump for ${VENDOR_NAME}
             Firmware: ${{ github.event.inputs.FIRMWARE_LINK }}"
+            git push -u origin ${{ env.BRANCH }}
         done
 
         git add .
-        git commit -s -m "dump: import remaining dump for ${{ env.VENDOR_NAME }}
+        git commit -s -m "dump: import remaining dump for ${VENDOR_NAME}
         Firmware: ${{ github.event.inputs.FIRMWARE_LINK }}"
-        
         git push -u origin ${{ env.BRANCH }}
