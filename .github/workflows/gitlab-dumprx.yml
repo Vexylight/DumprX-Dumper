@@ -33,44 +33,6 @@ jobs:
         git clone --depth=1 https://github.com/DumprX/DumprX.git ./dumprx
         cd dumprx && bash setup.sh
 
-    # Fix for "Illegal instruction" – extract latest x86_64 magiskboot from APK
-    - name: Install latest x86_64 magiskboot
-      run: |
-        # Get the latest release data from GitHub API
-        RELEASE_DATA=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest)
-        LATEST_TAG=$(echo "$RELEASE_DATA" | jq -r .tag_name)
-        
-        if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
-          echo "Failed to get latest tag, falling back to v28.0"
-          LATEST_TAG="v28.0"
-        fi
-        echo "Latest tag: $LATEST_TAG"
-
-        # Find the APK asset URL from the release data
-        APK_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("Magisk-.*\\.apk$")) | .browser_download_url' | head -n1)
-        
-        if [ -z "$APK_URL" ] || [ "$APK_URL" = "null" ]; then
-          echo "No APK asset found in release data, trying fallback URL"
-          APK_URL="https://github.com/topjohnwu/Magisk/releases/download/${LATEST_TAG}/Magisk-${LATEST_TAG#v}.apk"
-        fi
-        
-        echo "Downloading APK from: $APK_URL"
-        # Download with retry and fallback
-        wget -q --tries=3 --timeout=10 -O /tmp/magisk.apk "$APK_URL" || {
-          echo "Download failed, falling back to hardcoded v28.0 APK"
-          wget -q -O /tmp/magisk.apk "https://github.com/topjohnwu/Magisk/releases/download/v28.0/Magisk-28.0.apk"
-        }
-
-        # Extract the x86_64 binary from the APK
-        unzip -j /tmp/magisk.apk 'lib/x86_64/libmagiskboot.so' -d /tmp
-        mv /tmp/libmagiskboot.so /tmp/magiskboot
-        chmod +x /tmp/magiskboot
-
-        # Set environment variable for dumper.sh
-        echo "MAGISKBOOT=/tmp/magiskboot" >> $GITHUB_ENV
-        # Also replace the one inside the workspace to be safe
-        cp /tmp/magiskboot workspace/dumprx/bin/magiskboot 2>/dev/null || true
-
     - name: Dump Firmware
       run: |
         cd workspace/dumprx
@@ -102,20 +64,43 @@ jobs:
         echo "VENDOR_NAME=$(grep "ro.product.vendor.device" vendor/build.prop | awk -F "=" '{split($2, words, " "); print words[1]; exit}')" >> $GITHUB_ENV
         echo "BRANCH=$(grep "ro.vendor.build.id" vendor/build.prop | awk -F "=" '{split($2, words, " "); print words[1]; exit}')" >> $GITHUB_ENV
 
-    - name: Create Gitlab Repository
+    - name: Check or Create GitLab Repository
+      id: repo_check
       run: |
         cd workspace
-        curl --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" -X POST "https://gitlab.com/api/v4/projects?name=android_dump_${{ env.MANUFACTURER_NAME }}_${{ env.VENDOR_NAME }}&visibility=public" > repo.json
-        echo "USERNAME=$(cat repo.json | grep -o '"username":"[^"]*' | cut -d'"' -f4)" >> $GITHUB_ENV
+        REPO_NAME="android_dump_${{ env.MANUFACTURER_NAME }}_${{ env.VENDOR_NAME }}"
+        
+        # Try to get project info. If 404, it doesn't exist.
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" "https://gitlab.com/api/v4/projects/${{ secrets.GITLAB_USERNAME }}%2F${REPO_NAME}")
+        
+        if [ "$HTTP_STATUS" -eq 200 ]; then
+          echo "✅ Repository already exists. Skipping creation."
+          echo "REPO_EXISTS=true" >> $GITHUB_ENV
+          # Fetch existing repo details to get the correct namespace/username
+          curl -s --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" "https://gitlab.com/api/v4/projects/${{ secrets.GITLAB_USERNAME }}%2F${REPO_NAME}" > repo.json
+        else
+          echo "🆕 Repository not found. Creating new repo..."
+          echo "REPO_EXISTS=false" >> $GITHUB_ENV
+          # Create new repo
+          curl --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" -X POST "https://gitlab.com/api/v4/projects?name=${REPO_NAME}&visibility=public" > repo.json
+        fi
+        
+        # Extract username/namespace from the JSON response (works for both new and existing)
+        # Using python3 for reliable JSON parsing
+        echo "USERNAME=$(cat repo.json | python3 -c "import sys, json; print(json.load(sys.stdin)['namespace']['path'])")" >> $GITHUB_ENV
+        echo "REPO_NAME=${REPO_NAME}" >> $GITHUB_ENV
+        
         cat repo.json
 
-    - name: Push as Repository
+    - name: Push to GitLab
       run: |
         cd workspace/dumprx/out
         rm -rf .git
         rm -rf .gitignore
         rm -rf .gitattributes
+        
         DUMP_DIR_LIST=$(find -type d -not -empty -printf "%P\n" | grep -v / | grep -v .git)
+        
         git init
         git lfs install
 
@@ -125,31 +110,38 @@ jobs:
         git config --global http.lowSpeedLimit 0
         git config --global http.lowSpeedTime 999999
 
-        # Set the correct Git user identity (as requested)
+        # Set Git identity
         git config --global user.name "VexLight"
         git config --global user.email "vexlight99@gmail.com"
 
+        # Generate .gitignore for sensitive files
         find . \( -name "*sensetime*" -o -name "*.lic" \) | cut -d'/' -f'2-' >| .gitignore
+        
+        # Use BRANCH as the branch name
         git branch -M ${{ env.BRANCH }}
-        git remote add origin https://${{ secrets.GITLAB_TOKEN_NAME }}:${{ secrets.GITLAB_TOKEN }}@gitlab.com/${{ env.USERNAME }}/android_dump_${{ env.MANUFACTURER_NAME }}_${{ env.VENDOR_NAME }}.git
+        
+        # Remote URL
+        REMOTE_URL="https://${{ secrets.GITLAB_TOKEN_NAME }}:${{ secrets.GITLAB_TOKEN }}@gitlab.com/${{ env.USERNAME }}/${{ env.REPO_NAME }}.git"
+        git remote add origin $REMOTE_URL
 
-        # Track all files larger than 100MB with LFS
+        # Track large files with LFS
         find . -type f -size +100M -exec git lfs track {} \;
 
         if [ -f .gitattributes ]; then
             git add .gitattributes
             git commit -s -m "Setup Git LFS"
-            git push -u origin ${{ env.BRANCH }}
         fi
 
         for dir in ${DUMP_DIR_LIST}; do
             git add ${dir}
-            git commit -s -m "dump: ${dir}: import dump for ${VENDOR_NAME}
-            Firmware: ${{ github.event.inputs.FIRMWARE_LINK }}"
-            git push -u origin ${{ env.BRANCH }}
+            git commit -s -m "dump: ${dir}: import dump for ${{ env.VENDOR_NAME }}
+        Firmware: ${{ github.event.inputs.FIRMWARE_LINK }}"
         done
 
         git add .
-        git commit -s -m "dump: import remaining dump for ${VENDOR_NAME}
+        git commit -s -m "dump: import remaining dump for ${{ env.VENDOR_NAME }}
         Firmware: ${{ github.event.inputs.FIRMWARE_LINK }}"
+        
+        # Push to the branch. 
+        # If branch exists, it updates. If not, it creates it.
         git push -u origin ${{ env.BRANCH }}
