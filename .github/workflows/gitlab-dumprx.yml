@@ -38,7 +38,20 @@ jobs:
         cd workspace/dumprx
         bash dumper.sh ${{ github.event.inputs.FIRMWARE_LINK }}
         cd out
+        
+        # Extract Manufacturer
         echo "MANUFACTURER_NAME=$(grep "ro.product.vendor.manufacturer" vendor/build.prop | awk -F "=" '{split($2, words, " "); print words[1]; exit}')" >> $GITHUB_ENV
+
+        # Extract the Full Build String for Repo Name
+        # Format: a34xdxx-user 15 AP3A.240905.015.A2 A346EXXSADYG1 release-keys
+        RAW_BUILD_STRING=$(grep "^## " device_info.txt | sed 's/^## //')
+        
+        # Sanitize: Replace spaces with hyphens for valid GitLab repo name
+        # Result: a34xdxx-user-15-AP3A.240905.015.A2-A346EXXSADYG1-release-keys
+        SAFE_REPO_NAME=$(echo "$RAW_BUILD_STRING" | tr ' ' '-')
+        
+        echo "REPO_NAME=${SAFE_REPO_NAME}" >> $GITHUB_ENV
+        echo "Generated Repo Name: ${SAFE_REPO_NAME}"
 
     - name: Set Variables - if oplus
       if: env.MANUFACTURER_NAME == 'oplus'
@@ -65,32 +78,50 @@ jobs:
         echo "BRANCH=$(grep "ro.vendor.build.id" vendor/build.prop | awk -F "=" '{split($2, words, " "); print words[1]; exit}')" >> $GITHUB_ENV
 
     - name: Check or Create GitLab Repository
-      id: repo_check
       run: |
         cd workspace
-        REPO_NAME="android_dump_${{ env.MANUFACTURER_NAME }}_${{ env.VENDOR_NAME }}"
         
-        # Try to get project info. If 404, it doesn't exist.
-        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" "https://gitlab.com/api/v4/projects/${{ secrets.GITLAB_USERNAME }}%2F${REPO_NAME}")
+        # Determine Username
+        GL_USER="${{ secrets.GITLAB_USERNAME }}"
+        if [ -z "$GL_USER" ]; then
+          GL_USER="${{ secrets.GITLAB_TOKEN_NAME }}"
+        fi
+        
+        if [ -z "$GL_USER" ]; then
+          echo "::error::GitLab Username not found in secrets."
+          exit 1
+        fi
+
+        echo "🔍 Checking for repo: ${GL_USER}/${{ env.REPO_NAME }}"
+
+        # Check if repo exists
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" "https://gitlab.com/api/v4/projects/${GL_USER}%2F${{ env.REPO_NAME }}")
         
         if [ "$HTTP_STATUS" -eq 200 ]; then
           echo "✅ Repository already exists. Skipping creation."
           echo "REPO_EXISTS=true" >> $GITHUB_ENV
-          # Fetch existing repo details to get the correct namespace/username
-          curl -s --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" "https://gitlab.com/api/v4/projects/${{ secrets.GITLAB_USERNAME }}%2F${REPO_NAME}" > repo.json
+          curl -s --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" "https://gitlab.com/api/v4/projects/${GL_USER}%2F${{ env.REPO_NAME }}" > repo.json
         else
           echo "🆕 Repository not found. Creating new repo..."
           echo "REPO_EXISTS=false" >> $GITHUB_ENV
-          # Create new repo
-          curl --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" -X POST "https://gitlab.com/api/v4/projects?name=${REPO_NAME}&visibility=public" > repo.json
+          # Create new repo with the sanitized build string name
+          curl --header "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" -X POST "https://gitlab.com/api/v4/projects?name=${{ env.REPO_NAME }}&visibility=public" > repo.json
         fi
         
-        # Extract username/namespace from the JSON response (works for both new and existing)
-        # Using python3 for reliable JSON parsing
-        echo "USERNAME=$(cat repo.json | python3 -c "import sys, json; print(json.load(sys.stdin)['namespace']['path'])")" >> $GITHUB_ENV
-        echo "REPO_NAME=${REPO_NAME}" >> $GITHUB_ENV
-        
-        cat repo.json
+        # Extract Namespace from JSON
+        if command -v python3 &>/dev/null; then
+          EXTRACTED_USER=$(cat repo.json | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('namespace', {}).get('path', ''))")
+        else
+          EXTRACTED_USER="$GL_USER"
+        fi
+
+        if [ -z "$EXTRACTED_USER" ]; then
+          EXTRACTED_USER="$GL_USER"
+        fi
+
+        echo "USERNAME=${EXTRACTED_USER}" >> $GITHUB_ENV
+        echo "Final Repo Name: ${{ env.REPO_NAME }}"
+        echo "Final Username: ${EXTRACTED_USER}"
 
     - name: Push to GitLab
       run: |
@@ -117,11 +148,13 @@ jobs:
         # Generate .gitignore for sensitive files
         find . \( -name "*sensetime*" -o -name "*.lic" \) | cut -d'/' -f'2-' >| .gitignore
         
-        # Use BRANCH as the branch name
+        # Use BRANCH as the branch name (e.g., A346EXXSADYG1)
         git branch -M ${{ env.BRANCH }}
         
         # Remote URL
         REMOTE_URL="https://${{ secrets.GITLAB_TOKEN_NAME }}:${{ secrets.GITLAB_TOKEN }}@gitlab.com/${{ env.USERNAME }}/${{ env.REPO_NAME }}.git"
+        
+        echo "🚀 Pushing to: $REMOTE_URL"
         git remote add origin $REMOTE_URL
 
         # Track large files with LFS
@@ -142,6 +175,5 @@ jobs:
         git commit -s -m "dump: import remaining dump for ${{ env.VENDOR_NAME }}
         Firmware: ${{ github.event.inputs.FIRMWARE_LINK }}"
         
-        # Push to the branch. 
-        # If branch exists, it updates. If not, it creates it.
+        # Push to the branch
         git push -u origin ${{ env.BRANCH }}
