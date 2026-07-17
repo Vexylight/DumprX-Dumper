@@ -105,8 +105,8 @@ jobs:
         git config --global http.lowSpeedTime 999999
 
         # Set the correct Git user identity (as requested)
-        git config --global user.name "VexLight"
-        git config --global user.email "vexlight99@gmail.com"
+        git config --global user.name "oifaaahyeah"
+        git config --global user.email "oifaaahyeah@gmail.com"
 
         find . \( -name "*sensetime*" -o -name "*.lic" \) | cut -d'/' -f'2-' >| .gitignore
         git branch -M ${{ env.BRANCH }}
